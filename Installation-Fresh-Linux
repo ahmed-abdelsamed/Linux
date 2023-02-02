@@ -13,3 +13,17 @@ EOF
 
 # install dig nslookup
 sudo yum install bind-utils -y
+
+#How to Configure NTP Client Using Chrony in RHEL 8
+sudo yum install chrony -y
+sudo systemctl start chronyd
+sudo systemctl enable chronyd
+sudo systemctl status chronyd
+
+vi /etc/chrony.conf
+'
+# pool 2.rhel.pool.ntp.org iburs
+
+server   0.africa.pool.ntp.org
+server   1.africa.pool.ntp.org
+'
