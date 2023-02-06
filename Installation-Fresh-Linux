@@ -27,3 +27,4 @@ vi /etc/chrony.conf
 server   0.africa.pool.ntp.org
 server   1.africa.pool.ntp.org
 '
+sudo dnf install net-tools
