@@ -3,6 +3,18 @@
 # Usage: ./export_module.sh <module_name>:<stream>
 # Example: ./export_module.sh nodejs:20
 
+##### post script
+# chmod +x export_module.sh
+#./export_module.sh nodejs:20
+# sudo nano /etc/yum.repos.d/offline-local.repo
+#[offline-repo]
+#name=Local Offline Module
+#baseurl=file:///path/to/offline-module
+#enabled=1
+#gpgcheck=0
+#sudo dnf --disablerepo=* --enablerepo=offline-repo install @nodejs:20
+
+
 MODULE_INPUT=$1
 DEST_DIR="./offline_repo_${MODULE_INPUT//:/_}"
 
