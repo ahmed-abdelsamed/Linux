@@ -1,0 +1,302 @@
+# iSCSI Shared Disks Setup on Oracle Linux 9
+
+## Architecture Overview
+
+```
+iSCSI Target Server          iSCSI Initiators
+┌─────────────────┐         ┌──────────────────┐
+│  Storage Server │────────▶│ rac1.linkdev.net  │
+│  (can be node1) │         │  192.168.100.81   │
+│                 │         └──────────────────┘
+│  /dev/sdb ─ LUN0│────────▶┌──────────────────┐
+│  /dev/sdc ─ LUN1│         │ rac2.linkdev.net  │
+│  /dev/sdd ─ LUN2│         │  192.168.100.82   │
+└─────────────────┘         └──────────────────┘
+```
+
+> **Assumption:** We'll use a **dedicated storage server** (or one of the nodes) as the iSCSI Target. I'll use a **separate storage server: 192.168.100.83** — if you want to use one of the RAC nodes as target, just apply those steps on that node.
+
+---
+
+## PART 1 — iSCSI TARGET (Storage Server: 192.168.100.83)
+
+### Step 1: Install targetcli
+
+```bash
+sudo dnf install -y targetcli
+sudo systemctl enable --now targetcli
+```
+
+### Step 2: Prepare 3 Disks
+
+Check available disks:
+```bash
+lsblk
+```
+
+We'll use **/dev/sdb**, **/dev/sdc**, **/dev/sdd** as the 3 shared disks:
+
+```bash
+# Wipe any existing data
+sudo wipefs -a /dev/sdb
+sudo wipefs -a /dev/sdc
+sudo wipefs -a /dev/sdd
+```
+
+### Step 3: Configure iSCSI Target with targetcli
+
+```bash
+sudo targetcli
+```
+
+Inside targetcli shell, run these commands one by one:
+
+```bash
+# Create 3 block storage backingstores
+/backstores/block create disk1 /dev/sdb
+/backstores/block create disk2 /dev/sdc
+/backstores/block create disk3 /dev/sdd
+
+# Create iSCSI target IQN
+/iscsi create iqn.2026-02.net.linkdev:storage.target01
+
+# Create portal - listen on all IPs
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/portals create 0.0.0.0 3260
+
+# Create 3 LUNs
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/luns create /backstores/block/disk1
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/luns create /backstores/block/disk2
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/luns create /backstores/block/disk3
+
+# Create ACLs for both initiators
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/acls create iqn.2026-02.net.linkdev:rac1.initiator
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/acls create iqn.2026-02.net.linkdev:rac2.initiator
+
+# Set CHAP authentication (optional but recommended)
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/acls/iqn.2026-02.net.linkdev:rac1.initiator set auth userid=rac1user password=rac1password
+/iscsi/iqn.2026-02.net.linkdev:storage.target01/tpg1/acls/iqn.2026-02.net.linkdev:rac2.initiator set auth userid=rac2user password=rac2password
+
+# Save and exit
+saveconfig
+exit
+```
+
+### Step 4: Verify Target Configuration
+
+```bash
+sudo targetcli ls
+```
+
+Expected output:
+```
+o- / .....................................
+  o- backstores ........................
+  | o- block ...........................
+  |   o- disk1 /dev/sdb (size) .......
+  |   o- disk2 /dev/sdc (size) .......
+  |   o- disk3 /dev/sdd (size) .......
+  o- iscsi ............................
+    o- iqn.2026-02.net.linkdev:storage.target01
+      o- tpg1 .........................
+        o- acls .......................
+        | o- iqn.2026-02.net.linkdev:rac1.initiator
+        | o- iqn.2026-02.net.linkdev:rac2.initiator
+        o- luns .......................
+        | o- lun0 .....................
+        | o- lun1 .....................
+        | o- lun2 .....................
+        o- portals ....................
+          o- 0.0.0.0:3260 .............
+```
+
+### Step 5: Firewall on Target
+
+```bash
+sudo firewall-cmd --permanent --add-port=3260/tcp
+sudo firewall-cmd --permanent --add-service=iscsi-target
+sudo firewall-cmd --reload
+```
+
+---
+
+## PART 2 — iSCSI INITIATOR (Both RAC Nodes: 81 and 82)
+
+### Step 1: Install iSCSI Initiator Tools
+
+```bash
+# On both rac1 and rac2
+sudo dnf install -y iscsi-initiator-utils
+sudo systemctl enable --now iscsid
+```
+
+### Step 2: Set Initiator IQN
+
+On **rac1 (192.168.100.81)**:
+```bash
+sudo tee /etc/iscsi/initiatorname.iscsi > /dev/null <<'EOF'
+InitiatorName=iqn.2026-02.net.linkdev:rac1.initiator
+EOF
+```
+
+On **rac2 (192.168.100.82)**:
+```bash
+sudo tee /etc/iscsi/initiatorname.iscsi > /dev/null <<'EOF'
+InitiatorName=iqn.2026-02.net.linkdev:rac2.initiator
+EOF
+```
+
+### Step 3: Configure CHAP Authentication
+
+On **rac1**:
+```bash
+sudo tee -a /etc/iscsi/iscsid.conf > /dev/null <<'EOF'
+
+# CHAP Authentication
+node.session.auth.authmethod = CHAP
+node.session.auth.username = rac1user
+node.session.auth.password = rac1password
+EOF
+```
+
+On **rac2**:
+```bash
+sudo tee -a /etc/iscsi/iscsid.conf > /dev/null <<'EOF'
+
+# CHAP Authentication
+node.session.auth.authmethod = CHAP
+node.session.auth.username = rac2user
+node.session.auth.password = rac2password
+EOF
+```
+
+### Step 4: Discover and Login to Target
+
+On **both rac1 and rac2**:
+
+```bash
+# Restart iscsid to apply config
+sudo systemctl restart iscsid
+
+# Discover targets
+sudo iscsiadm -m discovery -t sendtargets -p 192.168.100.83:3260
+
+# Login to target
+sudo iscsiadm -m node \
+  --targetname iqn.2026-02.net.linkdev:storage.target01 \
+  --portal 192.168.100.83:3260 \
+  --login
+
+# Enable automatic login on boot
+sudo iscsiadm -m node \
+  --targetname iqn.2026-02.net.linkdev:storage.target01 \
+  --portal 192.168.100.83:3260 \
+  --op update \
+  --name node.startup \
+  --value automatic
+```
+
+### Step 5: Verify Disks Are Available
+
+```bash
+# Check new block devices
+lsblk
+
+# Should show 3 new disks
+ls -la /dev/disk/by-path/ | grep iscsi
+
+# Verify with iscsiadm
+sudo iscsiadm -m session -P 3
+```
+
+---
+
+## PART 3 — Persistent Disk Naming with udev (Both Nodes)
+
+This ensures disks always get the same name after reboot:
+
+```bash
+# Get disk IDs
+sudo ls -la /dev/disk/by-id/ | grep iscsi
+
+# Create udev rules
+sudo tee /etc/udev/rules.d/99-iscsi-disks.rules > /dev/null <<'EOF'
+# iSCSI Shared Disks for RAC
+ENV{ID_SERIAL}=="<disk1-serial>", SYMLINK+="iscsi-disk1"
+ENV{ID_SERIAL}=="<disk2-serial>", SYMLINK+="iscsi-disk2"
+ENV{ID_SERIAL}=="<disk3-serial>", SYMLINK+="iscsi-disk3"
+EOF
+
+# Reload udev
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+---
+
+## PART 4 — Verify Shared Disks on Both Nodes
+
+```bash
+# Check disks are visible on BOTH nodes
+lsblk | grep -E "sd[b-d]"
+
+# Check disk IDs match on both nodes
+ls -la /dev/disk/by-id/ | grep iscsi
+
+# Test disk access from rac1
+sudo dd if=/dev/zero of=/dev/sdb bs=4k count=10 status=progress
+
+# Verify from rac2 (should see the changes)
+sudo hexdump -C /dev/sdb | head
+```
+
+---
+
+## PART 5 — Multipath (Optional but Recommended for HA)
+
+```bash
+# Install on both nodes
+sudo dnf install -y device-mapper-multipath
+
+# Generate default config
+sudo mpathconf --enable --with_multipathd y
+
+# Start service
+sudo systemctl enable --now multipathd
+
+# Verify multipath devices
+sudo multipath -ll
+```
+
+---
+
+## Quick Reference Summary
+
+| Component | Value |
+|-----------|-------|
+| Target IQN | `iqn.2026-02.net.linkdev:storage.target01` |
+| rac1 IQN | `iqn.2026-02.net.linkdev:rac1.initiator` |
+| rac2 IQN | `iqn.2026-02.net.linkdev:rac2.initiator` |
+| Target Port | `3260/tcp` |
+| Shared Disks | `/dev/sdb`, `/dev/sdc`, `/dev/sdd` |
+
+## Common Troubleshooting Commands
+
+```bash
+# Check iSCSI sessions
+sudo iscsiadm -m session
+
+# Logout and re-login
+sudo iscsiadm -m node --logout
+sudo iscsiadm -m node --login
+
+# Check target service
+sudo systemctl status targetcli
+
+# Check initiator service
+sudo systemctl status iscsid
+
+# View target logs
+sudo journalctl -u targetcli -f
+```
+
+Let me know if you want to proceed with Oracle RAC setup on top of these shared disks! 🚀
